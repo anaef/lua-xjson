@@ -1,0 +1,133 @@
+#!/bin/bash
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+	echo "usage: $0 LUA_ABI [LIBRARY]" >&2
+	exit 1
+fi
+
+cd "$(dirname "$0")/.." || exit 1
+
+lua_abi=$1
+lua_bin=/usr/bin/lua$lua_abi
+data=benchmarks/yyjson_benchmark/data/json
+
+case ${2-} in
+	'')
+		libraries="xjson cjson dkjson"
+		library_count=3
+		;;
+	cjson|xjson|dkjson)
+		libraries=$2
+		library_count=1
+		;;
+	*)
+		echo "unknown JSON library: $2" >&2
+		exit 1
+		;;
+esac
+
+if [ ! -d "$data" ]; then
+	echo "benchmark corpus not found: $data" >&2
+	exit 1
+fi
+
+results=$(mktemp) || exit 1
+trap 'rm -f "$results"' 0 1 2 15
+
+for path in "$data"/*.json; do
+	document=${path##*/}
+	document=${document%.json}
+	case $document in
+		canada)
+			repeat=800
+			;;
+		citm_catalog)
+			repeat=1800
+			;;
+		fgo)
+			repeat=25
+			;;
+		github_events)
+			repeat=40000
+			;;
+		gsoc-2018)
+			repeat=1200
+			;;
+		lottie)
+			repeat=1800
+			;;
+		otfcc)
+			repeat=10
+			;;
+		poet)
+			repeat=1200
+			;;
+		twitter|twitterescaped)
+			repeat=4500
+			;;
+		*)
+			repeat=1000
+			;;
+	esac
+	for operation in decode encode; do
+		for library in $libraries; do
+			if ! cpu=$("$lua_bin" benchmarks/benchmark.lua "$library" "$operation" "$path" \
+					"$repeat" 2>&1); then
+				printf '%s\n' "$cpu" >&2
+				exit 1
+			fi
+			printf '%s\t%s\t%s\t%s\t%s\n' "$library" "$operation" "$document" "$repeat" \
+					"$cpu" >>"$results"
+		done
+	done
+done
+
+awk -F '\t' -v library_count="$library_count" -v library_names="$libraries" '
+	BEGIN {
+		top = "┌─────────┬───────────┬────────────────┬─────────────┬────────────────┐"
+		middle = "├─────────┼───────────┼────────────────┼─────────────┼────────────────┤"
+		bottom = "└─────────┴───────────┴────────────────┴─────────────┴────────────────┘"
+		operation_names[1] = "decode"
+		operation_names[2] = "encode"
+		split(library_names, names, " ")
+		print top
+		print "│ Library │ Operation │ Document       │ Repetitions │            CPU │"
+		print middle
+	}
+	{
+		documents[$3] = 1
+		values[$3, $2, $1] = $5
+		if ($5 == "-") {
+			incomplete[$3] = 1
+		}
+		if (NR > 1 && (NR - 1) % library_count == 0) {
+			print middle
+		}
+		cpu = $5 == "-" ? "-" : $5 " s"
+		printf "│ %-7s │ %-9s │ %-14s │ %11s │ %14s │\n", $1, $2, $3, $4, cpu
+	}
+	END {
+		print middle
+		for (operation_index = 1; operation_index <= 2; operation_index++) {
+			if (operation_index > 1) {
+				print middle
+			}
+			operation = operation_names[operation_index]
+			for (library_index = 1; library_index <= library_count; library_index++) {
+				library = names[library_index]
+				total = 0
+				count = 0
+				for (document in documents) {
+					if (!incomplete[document]) {
+						total += values[document, operation, library]
+						count++
+					}
+				}
+				cpu = count == 0 ? "-" : sprintf("%.3f s", total / count)
+				printf "│ %-7s │ %-9s │ %-14s │ %11s │ %14s │\n", library, operation, \
+						"average", "-", cpu
+			}
+		}
+		print bottom
+	}
+' "$results"
